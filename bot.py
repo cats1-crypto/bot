@@ -64,8 +64,8 @@ def extract_product_id(url: str) -> str | None:
     return next(g for g in match.groups() if g)
 
 
-def generate_affiliate_link(product_url: str) -> dict:
-    """يستدعي aliexpress.affiliate.link.generate لتحويل رابط عادي إلى رابط أفلييت."""
+def _call_link_generate(product_url: str, promotion_link_type: str) -> str | None:
+    """يستدعي aliexpress.affiliate.link.generate ويرجع الرابط الأول إن وُجد."""
     params = {
         "app_key": APP_KEY,
         "method": "aliexpress.affiliate.link.generate",
@@ -73,13 +73,40 @@ def generate_affiliate_link(product_url: str) -> dict:
         "timestamp": str(int(time.time() * 1000)),
         "format": "json",
         "v": "2.0",
-        "promotion_link_type": "0",
+        "promotion_link_type": promotion_link_type,
         "source_values": product_url,
         "tracking_id": TRACKING_ID,
     }
     params["sign"] = sign_request(params)
     resp = requests.get(API_URL, params=params, timeout=15)
-    return resp.json()
+    data = resp.json()
+    promo_links = (
+        data.get("aliexpress_affiliate_link_generate_response", {})
+        .get("resp_result", {})
+        .get("result", {})
+        .get("promotion_links", {})
+        .get("promotion_link", [])
+    )
+    if not promo_links:
+        log.warning("Empty response (type=%s): %s", promotion_link_type, data)
+        return None
+    return promo_links[0]["promotion_link"]
+
+
+def generate_affiliate_links(product_url: str) -> dict:
+    """
+    Gera dois links de afiliado:
+    - mobile: promotion_link_type=2 (link 'hot product', costuma abrir o app e ativar desconto de moedas)
+    - desktop: promotion_link_type=0 (link geral, funciona bem em navegador/PC)
+
+    NOTA: a API da AliExpress não documenta oficialmente qual tipo é
+    "mobile" vs "desktop" — teste os dois links no celular e no PC.
+    Se estiverem trocados, basta inverter os valores "2" e "0" abaixo.
+    """
+    return {
+        "mobile": _call_link_generate(product_url, "2"),
+        "desktop": _call_link_generate(product_url, "0"),
+    }
 
 
 def get_product_detail(product_id: str) -> dict:
@@ -103,11 +130,11 @@ def get_product_detail(product_id: str) -> dict:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "أهلاً 👋\n"
-        "أرسل لي رابط أي منتج من AliExpress وسأرجع لك:\n"
-        "🔗 رابط الإحالة (Affiliate Link)\n"
-        "💰 السعر الحالي والخصم\n\n"
-        "فقط الصق الرابط هنا."
+        "Olá! 👋\n"
+        "Me envie o link de qualquer produto da AliExpress e eu te devolvo:\n"
+        "📱 Link para CELULAR (com desconto de moedas)\n"
+        "💻 Link para DESKTOP/NOTEBOOK\n\n"
+        "É só colar o link aqui."
     )
 
 
@@ -115,68 +142,54 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     match = PRODUCT_LINK_RE.search(text)
     if not match:
-        await update.message.reply_text("من فضلك أرسل رابط منتج صالح من AliExpress 🙏")
+        await update.message.reply_text("Por favor, envie um link válido de produto da AliExpress 🙏")
         return
 
     product_url = match.group(1)
-    await update.message.reply_text("⏳ جاري توليد رابط الإحالة...")
+    await update.message.reply_text("⏳ Gerando seus links de afiliado...")
 
     try:
-        link_data = generate_affiliate_link(product_url)
-        promo_links = (
-            link_data.get("aliexpress_affiliate_link_generate_response", {})
-            .get("resp_result", {})
-            .get("result", {})
-            .get("promotion_links", {})
-            .get("promotion_link", [])
-        )
-        if not promo_links:
+        links = generate_affiliate_links(product_url)
+        mobile_link = links.get("mobile")
+        desktop_link = links.get("desktop")
+
+        if not mobile_link and not desktop_link:
             await update.message.reply_text(
-                "⚠️ لم أتمكن من توليد رابط الإحالة. تأكد من صلاحية الرابط أو من إعدادات API."
+                "⚠️ Não consegui gerar o link de afiliado. Verifique o link enviado ou as configurações da API."
             )
-            log.warning("Empty response: %s", link_data)
             return
 
-        affiliate_url = promo_links[0]["promotion_link"]
-
-        product_id = extract_product_id(product_url)
-        price_text = ""
-        if product_id:
-            try:
-                detail = get_product_detail(product_id)
-                products = (
-                    detail.get("aliexpress_affiliate_productdetail_get_response", {})
-                    .get("resp_result", {})
-                    .get("result", {})
-                    .get("products", {})
-                    .get("product", [])
-                )
-                if products:
-                    p = products[0]
-                    orig = p.get("original_price")
-                    sale = p.get("target_sale_price") or p.get("sale_price")
-                    title = p.get("product_title", "")
-                    if orig and sale:
-                        price_text = f"\n🏷️ {title[:60]}\n💵 ~~{orig}~~ ➜ {sale} BRL"
-            except Exception as e:
-                log.warning("Product detail fetch failed: %s", e)
-
-        await update.message.reply_text(
-            f"✅ رابط الإحالة جاهز:\n{affiliate_url}{price_text}"
+        reply = "Para CELULAR (com desconto de moedas):\n"
+        reply += f"{mobile_link}\n\n" if mobile_link else "(indisponível)\n\n"
+        reply += "Para DESKTOP/NOTEBOOK:\n"
+        reply += f"{desktop_link}\n\n" if desktop_link else "(indisponível)\n\n"
+        reply += (
+            "Importante: O desconto com moedas só aparece se você abrir o "
+            "link do celular diretamente no aplicativo do AliExpress"
         )
+
+        await update.message.reply_text(reply)
 
     except Exception as e:
         log.exception("Error generating link")
-        await update.message.reply_text(f"❌ حدث خطأ: {e}")
+        await update.message.reply_text(f"❌ Ocorreu um erro: {e}")
 
 
 def main():
     if not BOT_TOKEN or not APP_KEY or not APP_SECRET:
         raise SystemExit(
-            "❌ تأكد من ضبط TELEGRAM_BOT_TOKEN و ALIEXPRESS_APP_KEY و ALIEXPRESS_APP_SECRET في ملف .env"
+            "❌ Configure TELEGRAM_BOT_TOKEN, ALIEXPRESS_APP_KEY e ALIEXPRESS_APP_SECRET no arquivo .env"
         )
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .connect_timeout(30)
+        .read_timeout(30)
+        .write_timeout(30)
+        .pool_timeout(30)
+        .build()
+    )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
