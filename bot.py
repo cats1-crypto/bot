@@ -24,6 +24,7 @@ import time
 import hmac
 import hashlib
 import logging
+import asyncio
 from urllib.parse import quote
 
 import requests
@@ -180,6 +181,14 @@ def main():
         raise SystemExit(
             "❌ Configure TELEGRAM_BOT_TOKEN, ALIEXPRESS_APP_KEY e ALIEXPRESS_APP_SECRET no arquivo .env"
         )
+
+    # إصلاح توافق Python 3.14: بعض النسخ الحديثة ما عادش كتخلق event loop
+    # تلقائيًا فـ الـ MainThread، وهاد الشيء كان كيخلي run_polling() يطيح
+    # بـ RuntimeError. هاد الجزء كيضمن وجود event loop قبل ما نبدأو.
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
 
     app = (
         Application.builder()
